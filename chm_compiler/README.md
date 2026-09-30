@@ -123,6 +123,13 @@ Compared with the PyWin32 help file (compiled by Microsoft `hhc.exe`), a chmc
 build shows **0 format differences**. The only differences are the optional
 features chmc doesn't generate.
 
+The same holds for Microsoft's *Excel 2013 Developer Documentation.chm* (from
+the Office 2013 VBA Documentation download; 6,952 files, 9.9 MB, 73 MB
+uncompressed). `verify` passes on the original, `extract` output matches
+chmlib byte for byte, and recompiling the extracted folder gives a file that
+conforms, shows 0 format differences against the original, and decompresses
+identically with 7-Zip and chmlib.
+
 ## Python API
 
 ```python

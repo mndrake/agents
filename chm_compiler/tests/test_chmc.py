@@ -107,6 +107,21 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(parsed[0].children[0].name, "A & 1")
         self.assertEqual(list(sitemap.iter_locals(parsed)), ["a.htm", "a1.htm", "b.htm"])
 
+    def test_sitemap_sibling_ul_per_child(self):
+        # Office 2013 developer docs wrap every child in its own <UL> placed
+        # after the parent's </LI>; siblings must not nest under each other.
+        def obj(name):
+            return f'<LI><OBJECT type="text/sitemap"><param name="Name" value="{name}"></OBJECT></LI>'
+        text = ("<UL>" + obj("Root")
+                + "<UL>" + obj("A") + "<UL>" + obj("A1") + "</UL></UL>"
+                + "<UL>" + obj("B") + "</UL>"
+                + "<UL>" + obj("C") + "</UL>"
+                + "</UL>")
+        root, = sitemap.parse_sitemap(text)
+        self.assertEqual([c.name for c in root.children], ["A", "B", "C"])
+        self.assertEqual([c.name for c in root.children[0].children], ["A1"])
+        self.assertEqual(root.children[1].children, [])
+
     def test_directory_many_files_uses_index_chunks(self):
         w = ITSFWriter()
         names = [f"/folder/subfolder/some_long_topic_name_{i:05d}.htm" for i in range(3000)]

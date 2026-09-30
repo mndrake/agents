@@ -22,15 +22,18 @@ class _SitemapParser(HTMLParser):
         self.root: List[SitemapItem] = []
         self.stack: List[List[SitemapItem]] = [self.root]
         self.current: Optional[dict] = None
-        self.last_item: Optional[SitemapItem] = None
         self.depth_started = False
 
     def handle_starttag(self, tag, attrs):
         a = {k.lower(): (v or "") for k, v in attrs}
         if tag == "ul":
             if self.depth_started:
-                target = self.last_item.children if self.last_item else self.stack[-1]
-                self.stack.append(target)
+                # A nested <UL> holds the children of the last item at the
+                # current level. Some compilers (e.g. the Office 2013 docs)
+                # wrap each child in its own <UL>, so this must not be the
+                # last item parsed, which may sit deeper in a closed sibling.
+                level = self.stack[-1]
+                self.stack.append(level[-1].children if level else level)
             self.depth_started = True
         elif tag == "object" and a.get("type", "").lower() == "text/sitemap":
             self.current = {}
@@ -50,7 +53,6 @@ class _SitemapParser(HTMLParser):
             if c.get("imagenumber", "").isdigit():
                 item.image_number = int(c["imagenumber"])
             self.stack[-1].append(item)
-            self.last_item = item
 
 
 def parse_sitemap(text: str) -> List[SitemapItem]:
