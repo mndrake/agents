@@ -1,0 +1,18 @@
+[OPTIONS]
+Compatibility=1.1 or later
+Compiled file=sample_help.chm
+Contents file=toc.hhc
+Index file=index.hhk
+Default topic=index.htm
+Default Window=main
+Display compile progress=No
+Language=0x409 English (United States)
+Title=Sample Help
+
+[WINDOWS]
+main="Sample Help","toc.hhc","index.hhk","index.htm","index.htm",,,,,0x42120,250,0x387e,[80,60,900,700],,,,,,,0
+
+[FILES]
+index.htm
+topics/getting_started.htm
+topics/faq.htm
