@@ -9,7 +9,7 @@ from typing import List, Optional
 
 from . import __version__
 from .project import ProjectError, compile_project, load_folder, load_hhp
-from .reader import read_directory
+from .reader import CHMFile, CHMFormatError, read_directory
 from .scaffold import create_project
 
 
@@ -61,6 +61,44 @@ def _cmd_list(args) -> int:
     return 0
 
 
+def _cmd_verify(args) -> int:
+    from .verify import format_comparison, format_report, verify
+    rep = verify(args.file, decompress=not args.no_decompress)
+    print(format_report(rep, show_info=not args.brief))
+    status = 1 if rep.failures else 0
+    if args.compare:
+        ref = verify(args.compare, decompress=not args.no_decompress)
+        print()
+        print(format_report(ref, show_info=not args.brief))
+        print(format_comparison(rep, ref))
+        status = status or (1 if ref.failures else 0)
+    return status
+
+
+def _cmd_extract(args) -> int:
+    try:
+        chm = CHMFile(args.file)
+        chm.decompress_all()
+    except (OSError, CHMFormatError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    count = 0
+    root = os.path.abspath(args.folder)
+    for e in chm.entries:
+        if not e.name.startswith("/") or e.name.endswith("/"):
+            continue
+        target = os.path.abspath(os.path.join(root, e.name.lstrip("/")))
+        if not target.startswith(root + os.sep):
+            print(f"skipping unsafe path {e.name!r}", file=sys.stderr)
+            continue
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as fh:
+            fh.write(chm.read(e.name))
+        count += 1
+    print(f"Extracted {count} files to {root}")
+    return 0
+
+
 def _cmd_init(args) -> int:
     try:
         hhp = create_project(args.folder, title=args.title)
@@ -102,6 +140,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     ls.add_argument("file")
     ls.add_argument("-a", "--all", action="store_true", help="include internal entries")
     ls.set_defaults(func=_cmd_list)
+
+    v = sub.add_parser("verify", help="check a .chm against the CHM format specification")
+    v.add_argument("file")
+    v.add_argument("-c", "--compare", metavar="REF.chm",
+                   help="also verify REF.chm and compare format parameters side by side")
+    v.add_argument("--no-decompress", action="store_true", help="skip full LZX decompression")
+    v.add_argument("-b", "--brief", action="store_true", help="hide informational lines")
+    v.set_defaults(func=_cmd_verify)
+
+    x = sub.add_parser("extract", help="decompile a .chm into a folder")
+    x.add_argument("file")
+    x.add_argument("folder")
+    x.set_defaults(func=_cmd_extract)
 
     i = sub.add_parser("init", help="create a starter help project")
     i.add_argument("folder")
