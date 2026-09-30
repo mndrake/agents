@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import html
 import os
 import posixpath
@@ -12,7 +13,7 @@ from html.parser import HTMLParser
 from typing import Callable, Dict, List, Optional
 from urllib.parse import unquote, urlsplit
 
-from . import internal, sitemap
+from . import fts, internal, sitemap, tocidx
 from .itsf import ITSFWriter
 
 HTML_EXTS = {".htm", ".html", ".xhtml", ".shtml"}
@@ -27,6 +28,7 @@ LCID_CODEPAGES = {
     0x0C04: "cp950", 0x0424: "cp1250", 0x0425: "cp1257", 0x0426: "cp1257",
     0x0427: "cp1257", 0x0402: "cp1251",
 }
+CODEPAGE_NUMBERS = {"gbk": 936}
 
 Log = Callable[[str], None]
 
@@ -51,10 +53,16 @@ class Project:
     generated: Dict[str, bytes] = field(default_factory=dict)  # virtual files
     follow_links: bool = True
     source: str = ""
+    full_text_search: bool = False
+    binary_toc: bool = False
 
     @property
     def encoding(self) -> str:
         return LCID_CODEPAGES.get(self.lcid, "cp1252")
+
+    @property
+    def codepage(self) -> int:
+        return CODEPAGE_NUMBERS.get(self.encoding) or int(self.encoding[2:])
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +178,8 @@ def load_hhp(path: str) -> Project:
     proj.default_topic = norm_rel(options["default topic"]) if options.get("default topic") else ""
     proj.default_window = options.get("default window", "")
     proj.default_font = options.get("default font", "")
+    proj.full_text_search = options.get("full-text search", "").lower() in ("yes", "1", "true")
+    proj.binary_toc = options.get("binary toc", "").lower() in ("yes", "1", "true")
     compiled = options.get("compiled file", "")
     proj.compiled_file = compiled.replace("\\", "/") if compiled else \
         os.path.splitext(os.path.basename(path))[0] + ".chm"
@@ -179,6 +189,14 @@ def load_hhp(path: str) -> Project:
         if lcid:
             proj.lcid = lcid
     return proj
+
+
+def _decode_html(raw: bytes, fallback: str) -> str:
+    """Decode a page: a BOM or valid UTF-8 wins, else the project's code page."""
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode(fallback, errors="replace")
 
 
 def _html_title(path: str) -> str:
@@ -204,7 +222,7 @@ def load_folder(folder: str, title: str = "", default_topic: str = "",
     folder = os.path.abspath(folder)
     if not os.path.isdir(folder):
         raise ProjectError(f"not a folder: {folder}")
-    proj = Project(base_dir=folder, source=folder, follow_links=False)
+    proj = Project(base_dir=folder, source=folder, follow_links=False, full_text_search=True)
     for root, dirs, files in os.walk(folder):
         dirs[:] = sorted(d for d in dirs if not d.startswith((".", "#", "$")))
         for fn in sorted(files):
@@ -396,6 +414,38 @@ def discover_linked(base_dir: str, start: List[str]) -> List[str]:
 # Compilation
 # ---------------------------------------------------------------------------
 
+def _binary_toc(toc_items: List[sitemap.SitemapItem], topics: List[internal.Topic],
+                strings: internal.StringTable) -> bytes:
+    """Build #TOCIDX. Its entries point at #TOPICS entries whose titles are
+    shown in the Contents tab, so a TOC entry takes over its page's topic (as
+    with hhc.exe, the topic's title becomes the entry's name); anchors, a
+    page listed again under another name and links to non-page files get
+    topics of their own."""
+    by_url = {t.url: i for i, t in enumerate(topics)}
+
+    def topic_for(item: sitemap.SitemapItem, node_offset: int) -> int:
+        parts = urlsplit(item.local.strip())
+        if parts.scheme or parts.netloc:
+            url = item.local.strip()
+        else:
+            url = norm_rel(unquote(parts.path)) if parts.path else ""
+            if parts.fragment:
+                url += "#" + parts.fragment
+        i = by_url.get(url)
+        if i is not None:
+            t = topics[i]
+            if not t.toc_offset:
+                t.title, t.toc_offset, t.in_contents = item.name or t.title, node_offset, True
+                return i
+            if t.title == item.name:
+                return i
+        topics.append(internal.Topic(url, item.name or None, node_offset, True))
+        by_url.setdefault(url, len(topics) - 1)
+        return len(topics) - 1
+
+    return tocidx.build_tocidx(toc_items, topic_for, strings.add)
+
+
 @dataclass
 class CompileResult:
     output: str
@@ -441,6 +491,7 @@ def compile_project(proj: Project, output: Optional[str] = None, level: int = 6,
                 want(f)
 
     toc_items: List[sitemap.SitemapItem] = []
+    toc_props: Dict[str, str] = {}
     for sm in (proj.contents_file, proj.index_file):
         if not sm:
             continue
@@ -455,6 +506,7 @@ def compile_project(proj: Project, output: Optional[str] = None, level: int = 6,
         items = sitemap.parse_sitemap(text)
         if sm == proj.contents_file:
             toc_items = items
+            toc_props = sitemap.site_properties(text)
         for local in sitemap.iter_locals(items):
             target = _local_target(local, "")
             if target:
@@ -493,15 +545,38 @@ def compile_project(proj: Project, output: Optional[str] = None, level: int = 6,
     if proj.default_topic and proj.default_topic not in file_data:
         warn(f"default topic not included: {proj.default_topic}")
 
-    # Topic table
+    # Full-text search index; document numbers are #TOPICS indices.
+    fti_data = b""
+    html_topics = [rel for rel in included if os.path.splitext(rel)[1].lower() in HTML_EXTS]
+    if proj.full_text_search and html_topics:
+        t_fts = time.time()
+        index = fts.FtsIndex(lcid=proj.lcid, codepage=proj.codepage)
+        for i, rel in enumerate(html_topics):
+            index.add_html(i, _decode_html(file_data[rel], enc))
+        fti_data = index.build()
+        log(f"Full-text index: {len(index.hits):,} entries for {index.total_words:,} words "
+            f"in {len(html_topics)} topics ({len(fti_data):,} bytes, "
+            f"{time.time() - t_fts:.2f}s)")
+
+    # Topic table: one topic per page, numbered as in the full-text index.
     toc_locals = {_local_target(x, "") for x in sitemap.iter_locals(toc_items)}
     topics = []
-    for rel in included:
-        if os.path.splitext(rel)[1].lower() in HTML_EXTS:
-            title = "" if rel in proj.generated else _html_title(os.path.join(proj.base_dir, rel))
-            topics.append(("/" + rel, title, rel in toc_locals))
-    tt = internal.build_topics([(p, t) for p, t, _ in topics], strings,
-                               {p for p, _, inside in topics if inside})
+    for rel in html_topics:
+        title = "" if rel in proj.generated else _html_title(os.path.join(proj.base_dir, rel))
+        topics.append(internal.Topic(rel, title or None, in_contents=rel in toc_locals))
+
+    tocidx_data = b""
+    binary_toc_key = None
+    if proj.binary_toc and toc_items:
+        tocidx_data = _binary_toc(toc_items, topics, strings)
+        # Like hhc.exe, list the sitemap files as (untitled) topics too; the
+        # contents file's #URLTBL key goes into #SYSTEM.
+        for sm in (proj.contents_file, proj.index_file):
+            if sm:
+                topics.append(internal.Topic(sm))
+        binary_toc_key = internal.url_hash(proj.contents_file)
+        log(f"Binary TOC: {len(tocidx_data):,} bytes")
+    tt = internal.build_topics(topics, strings)
 
     windows = list(proj.windows)
     windows_ok = {w.name for w in windows}
@@ -516,13 +591,26 @@ def compile_project(proj: Project, output: Optional[str] = None, level: int = 6,
         default_window = "main"
     elif not default_window:
         default_window = windows[0].name
+    if fti_data:  # show the Search tab on windows that don't set their own style
+        windows = [w if w.nav_props is not None else dataclasses.replace(
+            w, nav_props=internal.DEFAULT_NAV_PROPS | internal.HHWIN_PROP_TAB_SEARCH)
+            for w in windows]
     windows_data = internal.build_windows(windows, strings)
+
+    idxhdr = b""
+    if tocidx_data:
+        styles = toc_props.get("window styles")
+        ex_styles = toc_props.get("exwindow styles")
+        idxhdr = internal.build_idxhdr(len(topics), int(time.time()),
+                                       _parse_int(styles) if styles else None,
+                                       _parse_int(ex_styles) if ex_styles else None)
 
     compiled_name = os.path.splitext(os.path.basename(output))[0]
     system = internal.build_system(
         title=proj.title, default_topic=proj.default_topic, contents_file=proj.contents_file,
         index_file=proj.index_file, default_window=default_window, compiled_name=compiled_name,
-        lcid=proj.lcid, encoding=enc, default_font=proj.default_font)
+        lcid=proj.lcid, encoding=enc, default_font=proj.default_font,
+        full_text_search=bool(fti_data), binary_toc_key=binary_toc_key, idxhdr=idxhdr)
 
     # Like HHC, keep #SYSTEM uncompressed in section 0 and add an empty #ITBITS.
     writer.add("/#ITBITS", b"", section=0)
@@ -532,6 +620,12 @@ def compile_project(proj: Project, output: Optional[str] = None, level: int = 6,
     writer.add("/#URLTBL", tt.urltbl)
     writer.add("/#URLSTR", tt.urlstr)
     writer.add("/#STRINGS", bytes(strings.data))
+    if tocidx_data:
+        writer.add("/#TOCIDX", tocidx_data)
+        writer.add("/#IDXHDR", idxhdr)
+    if fti_data:
+        writer.add("/$FIftiMain", fti_data)
+        writer.add("/$OBJINST", fts.build_objinst(proj.codepage, proj.lcid))
     for rel in included:
         writer.add("/" + rel, file_data[rel])
         log(f"  + {rel} ({len(file_data[rel]):,} bytes)")

@@ -118,6 +118,7 @@ def _sz(s: str, enc: str) -> bytes:
 def build_system(*, title: str, default_topic: str, contents_file: str, index_file: str,
                  default_window: str, compiled_name: str, lcid: int, encoding: str,
                  default_font: str = "", full_text_search: bool = False,
+                 binary_toc_key: Optional[int] = None, idxhdr: bytes = b"",
                  timestamp: Optional[float] = None) -> bytes:
     ts = time.time() if timestamp is None else timestamp
     out = struct.pack("<I", 3)  # version
@@ -126,7 +127,9 @@ def build_system(*, title: str, default_topic: str, contents_file: str, index_fi
     ft = _filetime(ts)
     out += _sys_entry(4, struct.pack("<IIIIIQII", lcid, 0, int(full_text_search), 0, 0,
                                      ft, 0, 0))
-    if contents_file:
+    # With a binary TOC hhc.exe leaves out the contents file (code 0), so the
+    # viewer reads #TOCIDX.
+    if contents_file and binary_toc_key is None:
         out += _sys_entry(0, _sz(contents_file, encoding))
     if index_file:
         out += _sys_entry(1, _sz(index_file, encoding))
@@ -138,7 +141,12 @@ def build_system(*, title: str, default_topic: str, contents_file: str, index_fi
     out += _sys_entry(6, _sz(compiled_name, encoding))
     if default_font:
         out += _sys_entry(16, _sz(default_font, encoding))
+    if binary_toc_key is not None:  # #URLTBL key of the contents file's URL
+        out += _sys_entry(11, struct.pack("<I", binary_toc_key))
     out += _sys_entry(12, struct.pack("<I", 0))  # number of information types
+    if idxhdr:
+        out += _sys_entry(13, idxhdr)
+        out += _sys_entry(15, struct.pack("<I", 0))  # information type checksum
     return out
 
 
@@ -202,11 +210,33 @@ class TopicTables:
     urlstr: bytes = b""
 
 
-def build_topics(topics: List[tuple], strings: StringTable, in_toc: set) -> TopicTables:
-    """``topics`` is a list of (path, title) for every HTML page."""
+@dataclass
+class Topic:
+    """A #TOPICS entry. ``url`` is the path inside the CHM, without a leading
+    slash (``html/page.htm``), as hhc.exe stores it."""
+    url: str
+    title: Optional[str] = None
+    toc_offset: int = 0       # node in #TOCIDX, 0 if none
+    in_contents: bool = False
+
+
+def url_hash(url: str) -> int:
+    """The key #URLTBL is sorted on; the viewer binary-searches it to map a
+    URL to its topic. Each character is a base-43 digit counted from '0',
+    with characters above 'Z' folded down by 32 and '/' counted as '\\'.
+    Reproduces all 6,697 keys of the Excel 2013 developer documentation."""
+    h = 0
+    for c in url.encode("utf-8"):
+        if c in (0x2F, 0x5C):
+            c = 0x5C
+        elif c > 0x5A:
+            c = (c - 32) & 0xFF
+        h = (h * 43 + c - 0x30) & 0xFFFFFFFF
+    return h
+
+
+def build_topics(topics: List[Topic], strings: StringTable) -> TopicTables:
     urlstr = bytearray()
-    urltbl = bytearray()
-    tops = bytearray()
 
     def add_urlstr(url: str) -> int:
         raw = url.encode("utf-8") + b"\0"
@@ -219,12 +249,34 @@ def build_topics(topics: List[tuple], strings: StringTable, in_toc: set) -> Topi
         urlstr.extend(struct.pack("<II", 0, 0) + raw)
         return off
 
-    for i, (path, title) in enumerate(topics):
-        if (len(urltbl) & 0xFFC) == 0xFFC:
-            urltbl.extend(bytes(4))
-        url_off = len(urltbl)
-        urltbl.extend(struct.pack("<III", 0, i, add_urlstr(path)))
-        title_off = strings.add(title) if title else 0xFFFFFFFF
-        flag = 6 if path in in_toc else 2
-        tops.extend(struct.pack("<IIIHH", 0, title_off, url_off, flag, 0))
+    str_offs = [add_urlstr(t.url) for t in topics]
+    # #URLTBL: 341 12-byte rows per 4 KiB block, each block ending in DWORD
+    # 4096, rows sorted by URL hash.
+    order = sorted(range(len(topics)), key=lambda i: url_hash(topics[i].url))
+    urltbl = bytearray()
+    url_offs = [0] * len(topics)
+    for i in order:
+        if (len(urltbl) & 0xFFF) == 0xFFC:
+            urltbl.extend(struct.pack("<I", 0x1000))
+        url_offs[i] = len(urltbl)
+        urltbl.extend(struct.pack("<III", url_hash(topics[i].url), i, str_offs[i]))
+
+    tops = bytearray()
+    for i, t in enumerate(topics):
+        title_off = strings.add(t.title) if t.title else 0xFFFFFFFF
+        tops.extend(struct.pack("<IIIHH", t.toc_offset, title_off, url_offs[i],
+                                6 if t.in_contents else 2, 0))
     return TopicTables(bytes(tops), bytes(urltbl), bytes(urlstr))
+
+
+def build_idxhdr(topic_count: int, timestamp: int, window_styles: Optional[int] = None,
+                 ex_window_styles: Optional[int] = None) -> bytes:
+    """#IDXHDR (also stored as #SYSTEM code 13) for a binary TOC, with the
+    values hhc.exe writes when the contents file sets no site properties."""
+    none = 0xFFFFFFFF
+    hdr = struct.pack("<4sIIIIIIIIIIIIIIIIIII", b"T#SM", timestamp & 0xFFFFFFFF, 1,
+                      topic_count, 0, none, 0, 0, none, none, none,
+                      none if window_styles is None else window_styles,
+                      none if ex_window_styles is None else ex_window_styles,
+                      none, none, none, 0, 1, 0, 0)
+    return hdr + bytes(0x1000 - len(hdr))

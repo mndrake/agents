@@ -122,11 +122,12 @@ Index file=index.hhk
 Default topic=index.htm
 Default Window=main
 Display compile progress=No
+Full-text search=Yes
 Language=0x409 English (United States)
 Title={title}
 
 [WINDOWS]
-main="{title}","toc.hhc","index.hhk","index.htm","index.htm",,,,,0x42120,250,0x387e,[80,60,900,700],,,,,,,0
+main="{title}","toc.hhc","index.hhk","index.htm","index.htm",,,,,0x42520,250,0x387e,[80,60,900,700],,,,,,,0
 
 [FILES]
 index.htm

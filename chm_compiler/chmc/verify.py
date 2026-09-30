@@ -261,6 +261,10 @@ def verify(path: str, decompress: bool = True) -> Report:
 
     # ---- HTML Help system files ----------------------------------------
     _check_system(chm, rep, decompress)
+    if decompress:
+        _check_topics(chm, rep)
+        _check_tocidx(chm, rep)
+        _check_fts(chm, rep)
 
     # ---- feature profile -------------------------------------------------
     A = "Features"
@@ -317,8 +321,7 @@ def _check_system(chm: CHMFile, rep: Report, decompress: bool) -> None:
               "#SYSTEM code 4 length": str(len(values.get(4, b""))) if 4 in values else "absent",
               "TOC storage": "binary (#TOCIDX)" if 11 in values or "/#TOCIDX" in chm.by_name else
               ("sitemap .hhc" if 0 in values else "none"),
-              "Index storage": "binary ($WWKeywordLinks)" if 7 in values else
-              ("sitemap .hhk" if 1 in values else "none")})
+              "Index storage": _index_storage(chm, values, decompress)})
 
     # #STRINGS / #WINDOWS
     strings = b""
@@ -359,6 +362,142 @@ def _check_system(chm: CHMFile, rep: Report, decompress: bool) -> None:
         n = chm.by_name["/#URLTBL"].length
         rep.add("Topic tables", "#URLTBL is a whole number of 12-byte entries (4 KiB blocks)",
                 (n % 4096) % 12 == 0 or (n % 4096) % 12 == 4, f"{n:,} bytes", soft=True)
+
+
+def _index_storage(chm: CHMFile, values: Dict[int, bytes], decompress: bool) -> str:
+    """How the keyword index is stored; an index without keywords is "empty"
+    whether it is an .hhk or the $WWKeywordLinks placeholders hhc.exe leaves."""
+    if "/$WWKeywordLinks/BTree" in chm.by_name:
+        return "binary ($WWKeywordLinks)"
+    if 1 in values:
+        name = "/" + values[1].split(b"\0")[0].decode("latin-1")
+        if decompress and name in chm.by_name:
+            from . import sitemap
+            items = sitemap.parse_sitemap(chm.read(name).decode("utf-8", "replace"))
+            if not items:
+                return "empty"
+        return "sitemap .hhk"
+    return "empty" if 7 in values else "none"
+
+
+def _read_topics(chm: CHMFile):
+    """[(toc offset, title offset, #URLTBL offset, flags)] or None."""
+    if "/#TOPICS" not in chm.by_name:
+        return None
+    data = chm.read("/#TOPICS")
+    return [struct.unpack_from("<IIIH", data, i) for i in range(0, len(data) - 15, 16)]
+
+
+def _check_topics(chm: CHMFile, rep: Report) -> None:
+    """#URLTBL rows must be sorted on the URL hash: the viewer binary-searches
+    them to map the page being shown to its topic (e.g. to sync the TOC)."""
+    from .internal import url_hash
+    if not all(n in chm.by_name for n in ("/#TOPICS", "/#URLTBL", "/#URLSTR")):
+        return
+    A = "Topic tables"
+    urltbl, urlstr = chm.read("/#URLTBL"), chm.read("/#URLSTR")
+    topics = _read_topics(chm) or []
+    rows, bad_ref = [], 0
+    for block in range(0, len(urltbl), 0x1000):
+        for k in range(341):
+            off = block + 12 * k
+            if off + 12 > len(urltbl):
+                break
+            key, topic, so = struct.unpack_from("<III", urltbl, off)
+            if so + 8 >= len(urlstr) or topic >= len(topics) or topics[topic][2] != off:
+                bad_ref += 1
+                continue
+            end = urlstr.find(b"\0", so + 8)
+            rows.append((key, urlstr[so + 8:end if end >= 0 else len(urlstr)]))
+    rep.add(A, "#URLTBL rows and #TOPICS entries point at each other", not bad_ref,
+            f"{bad_ref} bad" if bad_ref else f"{len(rows):,} rows")
+    keys = [k for k, _ in rows]
+    rep.add(A, "#URLTBL sorted by URL key", keys == sorted(keys), soft=True)
+    wrong = sum(url_hash(u.decode("utf-8", "replace")) != k for k, u in rows)
+    rep.add(A, "#URLTBL keys are the URL hashes", not wrong,
+            f"{wrong:,} of {len(rows):,} wrong: the viewer can't map pages to topics" if wrong
+            else "", soft=True)
+
+
+def _check_tocidx(chm: CHMFile, rep: Report) -> None:
+    from . import tocidx
+    if "/#TOCIDX" not in chm.by_name:
+        return
+    A = "Binary TOC"
+    data = chm.read("/#TOCIDX")
+    try:
+        roots = tocidx.read_tocidx(data)
+    except (ValueError, struct.error) as exc:
+        rep.add(A, "#TOCIDX node tree decodes", False, str(exc))
+        return
+    nodes: list = []
+    stack = list(roots)
+    while stack:
+        n = stack.pop()
+        nodes.append(n)
+        stack.extend(n.children)
+    rep.add(A, "#TOCIDX node tree decodes", True, f"{len(nodes):,} entries")
+    crossing = [n for n in nodes if n.offset // 0x1000 != (n.offset + (27 if n.flags & 4 else 19)) // 0x1000]
+    rep.add(A, "no entry crosses a 4 KiB block", not crossing, f"{len(crossing)} do" if crossing else "")
+    topics = _read_topics(chm) or []
+    bad = [n for n in nodes if n.has_local and n.ref >= len(topics)]
+    rep.add(A, "entries point at existing topics", not bad, f"{len(bad)} don't" if bad else "")
+    back = sum(1 for n in nodes if n.has_local and n.ref < len(topics) and topics[n.ref][0] == n.offset)
+    firsts = len({n.ref for n in nodes if n.has_local})
+    rep.add(A, "their topics point back at the entries", back >= firsts,
+            f"{back:,} of {firsts:,} topics", soft=True)
+    hdr = struct.unpack_from("<IIII", data, 0)
+    rep.add(A, "header: records and topic list inside the file",
+            hdr[0] == 0x1000 and hdr[3] <= hdr[1] <= len(data) and hdr[1] + 16 * hdr[2] <= len(data),
+            f"{hdr[2]:,} records")
+    if "/#IDXHDR" in chm.by_name:
+        idx = chm.read("/#IDXHDR")
+        rep.add(A, "#IDXHDR signature 'T#SM', 4096 bytes", idx[:4] == b"T#SM" and len(idx) == 4096)
+
+
+def _check_fts(chm: CHMFile, rep: Report) -> None:
+    from . import fts
+    if "/$FIftiMain" not in chm.by_name or not chm.by_name["/$FIftiMain"].length:
+        return
+    A = "Full-text search"
+    try:
+        r = fts.FtsReader(chm.read("/$FIftiMain"))
+    except ValueError as exc:
+        rep.add(A, "$FIftiMain header", False, str(exc))
+        return
+    h = r.header
+    rep.add(A, "header: signature, node size 4096, scale 2",
+            h.node_size == fts.NODE_SIZE and h.scales == (2, 2, 2) and h.root < len(r.data))
+    topics = _read_topics(chm) or []
+    try:
+        leaves = entries = 0
+        prev = None
+        order_ok = True
+        max_topic = -1
+        off = r.first_leaf()
+        while off:
+            leaves += 1
+            off, items = r.leaf_node(off)
+            for word, ctx, count, wlc_off, size in items:
+                key = (word, ctx)
+                order_ok &= prev is None or prev < key
+                prev = key
+                entries += 1
+                hits = r.wlc(count, wlc_off, size)
+                if hits:
+                    max_topic = max(max_topic, max(hits))
+        rep.add(A, "every leaf and word-location list decodes", True,
+                f"{entries:,} entries in {leaves} leaves")
+        rep.add(A, "leaf count matches header", leaves == h.leaves, f"{leaves} vs {h.leaves}")
+        rep.add(A, "words sorted", order_ok)
+        rep.add(A, "document numbers are #TOPICS entries", max_topic < len(topics),
+                f"highest {max_topic:,}, {len(topics):,} topics")
+    except (IndexError, ValueError, struct.error) as exc:
+        rep.add(A, "every leaf and word-location list decodes", False, f"{type(exc).__name__}: {exc}")
+    rep.add(A, "$OBJINST present", "/$OBJINST" in chm.by_name,
+            "" if "/$OBJINST" in chm.by_name else
+            "the viewer's Search tab finds nothing without it", soft=True)
+    rep.params["Full-text search"] = f"yes, root sizes {h.roots}"
 
 
 # ---------------------------------------------------------------------------

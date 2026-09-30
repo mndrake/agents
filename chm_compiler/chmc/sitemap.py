@@ -23,6 +23,8 @@ class _SitemapParser(HTMLParser):
         self.stack: List[List[SitemapItem]] = [self.root]
         self.current: Optional[dict] = None
         self.depth_started = False
+        self.properties: dict = {}
+        self.in_properties = False
 
     def handle_starttag(self, tag, attrs):
         a = {k.lower(): (v or "") for k, v in attrs}
@@ -37,6 +39,10 @@ class _SitemapParser(HTMLParser):
             self.depth_started = True
         elif tag == "object" and a.get("type", "").lower() == "text/sitemap":
             self.current = {}
+        elif tag == "object" and a.get("type", "").lower() == "text/site properties":
+            self.in_properties = True
+        elif tag == "param" and self.in_properties:
+            self.properties[a.get("name", "").lower()] = a.get("value", "")
         elif tag == "param" and self.current is not None:
             name = a.get("name", "").lower()
             # Keep the first value; "Name"/"Local" may repeat for multi-topic keywords.
@@ -46,6 +52,8 @@ class _SitemapParser(HTMLParser):
         if tag == "ul":
             if len(self.stack) > 1:
                 self.stack.pop()
+        elif tag == "object" and self.in_properties:
+            self.in_properties = False
         elif tag == "object" and self.current is not None:
             c = self.current
             self.current = None
@@ -60,6 +68,14 @@ def parse_sitemap(text: str) -> List[SitemapItem]:
     p.feed(text)
     p.close()
     return p.root
+
+
+def site_properties(text: str) -> dict:
+    """Params of the "text/site properties" object, keyed by lowercase name."""
+    p = _SitemapParser()
+    p.feed(text)
+    p.close()
+    return p.properties
 
 
 def iter_locals(items: List[SitemapItem]):

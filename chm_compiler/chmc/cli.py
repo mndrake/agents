@@ -30,6 +30,10 @@ def _cmd_build(args) -> int:
             return 2
         if args.lcid:
             proj.lcid = int(args.lcid, 0)
+        if args.search is not None:
+            proj.full_text_search = args.search
+        if args.binary_toc is not None:
+            proj.binary_toc = args.binary_toc
 
         def log(msg: str) -> None:
             if args.quiet or (msg.startswith("  + ") and not args.verbose):
@@ -131,6 +135,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     b.add_argument("--lcid", help="language id, e.g. 0x409")
     b.add_argument("--no-toc", action="store_true", help="folder mode: don't generate a TOC")
     b.add_argument("--no-index", action="store_true", help="folder mode: don't generate an index")
+    b.add_argument("--search", dest="search", action="store_true", default=None,
+                   help="build a full-text search index (default: on for folders, "
+                        "'Full-text search=' for .hhp projects)")
+    b.add_argument("--no-search", dest="search", action="store_false",
+                   help="don't build a full-text search index")
+    b.add_argument("--binary-toc", dest="binary_toc", action="store_true", default=None,
+                   help="also store the contents as a binary TOC (#TOCIDX), like "
+                        "'Binary TOC=Yes' in a .hhp project")
+    b.add_argument("--no-binary-toc", dest="binary_toc", action="store_false",
+                   help="don't build a binary TOC")
     b.add_argument("--strict", action="store_true", help="exit with status 3 on warnings")
     b.add_argument("-v", "--verbose", action="store_true", help="list every file added")
     b.add_argument("-q", "--quiet", action="store_true")
