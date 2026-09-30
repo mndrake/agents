@@ -74,6 +74,8 @@ instead of generating one. Use `--no-toc` or `--no-index` to skip generation.
 chmc build SOURCE [-o OUT.chm] [-l 0-9] [-t TITLE] [-d TOPIC] [--lcid 0x409]
                   [--no-toc] [--no-index] [--strict] [-v | -q]
 chmc list FILE.chm [-a]        # -a also shows internal/DataSpace entries
+chmc verify FILE.chm [-c REF.chm] [-b] [--no-decompress]
+chmc extract FILE.chm FOLDER   # decompile
 chmc init FOLDER [-t TITLE]
 chmc gui
 ```
@@ -81,6 +83,45 @@ chmc gui
 `-l` sets the compression level: `0` stores data uncompressed (fastest),
 `9` searches hardest, and the default is `6`. As a reference, the full PyWin32
 documentation (6,854 files, 8.8 MB) compiles in about 8 seconds to 1.6 MB.
+
+## Verifying a CHM against the spec
+
+`chmc verify` checks any `.chm` file, whether chmc built it or another tool
+did (Microsoft `hhc.exe`, Excel or Office help files, and so on). It runs
+about 50 checks:
+
+- the ITSF and ITSP headers and their GUIDs
+- the PMGL/PMGI directory chunks: links, quickref areas, sort order and the
+  index tree
+- the DataSpace files (NameList, Transform/List, LZXC ControlData, ResetTable
+  and SpanInfo)
+- a full LZX decompression of every frame, using the built-in decoder, which
+  handles verbatim, aligned-offset and uncompressed blocks
+- the `#SYSTEM`, `#WINDOWS`, `#STRINGS` and topic tables
+
+The report ends with either `CONFORMS to the CHM format` or
+`DOES NOT CONFORM`. The command exits with status 1 when any check fails.
+
+To check that a chmc build uses the same format as a reference CHM, compare
+the two:
+
+```bash
+python -m chmc build my_help/my_help.hhp
+python -m chmc verify my_help/my_help.chm --compare "C:\path\to\VBAXL10.CHM"
+```
+
+The comparison is split into two groups:
+
+- **File-format parameters.** These must be identical when two files follow
+  the same spec: ITSF/ITSP versions, header lengths, GUIDs, chunk size,
+  LZX window and reset interval, ResetTable layout, `#SYSTEM` version and
+  the `#WINDOWS` record size.
+- **Optional features.** These may legitimately differ, such as a binary TOC,
+  a full-text search index or aligned LZX blocks.
+
+Compared with the PyWin32 help file (compiled by Microsoft `hhc.exe`), a chmc
+build shows **0 format differences**. The only differences are the optional
+features chmc doesn't generate.
 
 ## Python API
 
@@ -112,6 +153,9 @@ ITSF header ─ header section 0 (file size)
 | `chmc/internal.py`| HTML Help system files: `#SYSTEM`, `#WINDOWS` (`HH_WINTYPE` records), `#STRINGS`, `#TOPICS`, `#URLTBL`, `#URLSTR` |
 | `chmc/project.py` | `.hhp` parsing, folder projects, link discovery, TOC and index generation, compilation |
 | `chmc/sitemap.py` | Reading and writing `.hhc`/`.hhk` sitemap files                                  |
+| `chmc/reader.py`  | CHM parser (headers, directory, sections) used by `list`, `extract` and `verify` |
+| `chmc/lzxd.py`    | LZX decoder (verbatim, aligned and uncompressed blocks; E8 translation)          |
+| `chmc/verify.py`  | Spec conformance checks and side-by-side comparison                            |
 | `chmc/gui.py`     | Tkinter front end                                                              |
 
 The container layout, `#SYSTEM` and `#WINDOWS` were checked field by field

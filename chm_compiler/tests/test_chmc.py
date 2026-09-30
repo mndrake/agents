@@ -20,7 +20,8 @@ from chmc import internal, lzx, sitemap  # noqa: E402
 from chmc.cli import main as cli_main  # noqa: E402
 from chmc.itsf import ITSFWriter, encint  # noqa: E402
 from chmc.project import compile_project, load_folder, load_hhp, parse_window  # noqa: E402
-from chmc.reader import read_directory  # noqa: E402
+from chmc.reader import CHMFile, read_directory  # noqa: E402
+from chmc.verify import format_comparison, format_report, verify  # noqa: E402
 from chmc.scaffold import create_project  # noqa: E402
 
 HAVE_7Z = shutil.which("7z") is not None
@@ -183,6 +184,85 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(cli_main(["build", hhp, "-o", out, "-q"]), 0)
         self.assertTrue(os.path.getsize(out) > 0)
         self.assertEqual(cli_main(["list", out]), 0)
+
+
+class ReaderAndVerifyTests(unittest.TestCase):
+    """Built-in decoder round trips and spec verification (no external tools)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _build(self, files, level, name="t.chm"):
+        w = ITSFWriter(compression_level=level)
+        for n, d in files.items():
+            w.add(n, d)
+        path = os.path.join(self.tmp, name)
+        with open(path, "wb") as fh:
+            fh.write(w.build())
+        return path
+
+    def test_builtin_decoder_roundtrip(self):
+        files = sample_files(30, seed=7)
+        files["zeros.bin"] = bytes(150000)
+        for level in (0, 1, 6):
+            chm = CHMFile(self._build(files, level, f"l{level}.chm"))
+            for name, data in files.items():
+                self.assertEqual(chm.read("/" + name), data, f"{name} level {level}")
+
+    def test_random_access_read_matches_full_decode(self):
+        files = sample_files(20, seed=8)
+        path = self._build(files, 6)
+        single = {n: CHMFile(path).read("/" + n) for n in files}
+        full = CHMFile(path)
+        full.decompress_all()
+        for n in files:
+            self.assertEqual(single[n], full.read("/" + n))
+
+    def test_verify_passes_for_compiled_project(self):
+        hhp = create_project(os.path.join(self.tmp, "demo"))
+        res = compile_project(load_hhp(hhp), log=quiet)
+        rep = verify(res.output)
+        self.assertEqual(rep.failures, 0, format_report(rep))
+        self.assertEqual(rep.warnings, 0, format_report(rep))
+        self.assertIn("CONFORMS", format_report(rep))
+        self.assertIn("0 format difference(s)", format_comparison(rep, verify(res.output)))
+
+    def test_verify_many_files_with_index_chunks(self):
+        files = {f"d/{i:05d}_a_fairly_long_topic_file_name.htm": b"x" * (i % 50) for i in range(2500)}
+        files["#SYSTEM"] = internal.build_system(
+            title="t", default_topic="", contents_file="", index_file="", default_window="",
+            compiled_name="t", lcid=0x409, encoding="cp1252")
+        rep = verify(self._build(files, 6))
+        self.assertEqual(rep.failures, 0, format_report(rep))
+        self.assertIn("PMGI", rep.params["Index depth"])
+
+    def test_verify_detects_corruption(self):
+        path = self._build(sample_files(5), 6)
+        with open(path, "r+b") as fh:
+            fh.seek(0x68)  # file size field in header section 0
+            fh.write(struct.pack("<Q", 12345))
+        rep = verify(path)
+        self.assertGreater(rep.failures, 0)
+        self.assertIn("DOES NOT CONFORM", format_report(rep))
+
+    def test_verify_rejects_non_chm(self):
+        path = os.path.join(self.tmp, "x.chm")
+        with open(path, "wb") as fh:
+            fh.write(b"not a chm file at all")
+        self.assertGreater(verify(path).failures, 0)
+
+    def test_cli_verify_and_extract(self):
+        hhp = create_project(os.path.join(self.tmp, "demo"))
+        res = compile_project(load_hhp(hhp), log=quiet)
+        self.assertEqual(cli_main(["verify", res.output, "-b"]), 0)
+        dest = os.path.join(self.tmp, "out")
+        self.assertEqual(cli_main(["extract", res.output, dest]), 0)
+        with open(os.path.join(self.tmp, "demo", "topics", "faq.htm"), "rb") as a, \
+                open(os.path.join(dest, "topics", "faq.htm"), "rb") as b:
+            self.assertEqual(a.read(), b.read())
 
 
 @unittest.skipUnless(HAVE_7Z or HAVE_CHMLIB, "no external CHM reader installed")
