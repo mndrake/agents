@@ -264,3 +264,9 @@ python -m unittest discover -s tests
 When `7z` or `extract_chmLib` is on the `PATH`, the tests also decompress the
 output and compare every file byte for byte. On Debian or Ubuntu, install them
 with `apt install p7zip-full libchm-bin`.
+
+## License
+
+MIT; see [LICENSE](LICENSE). `chmc/fts.py` embeds the character table that
+Microsoft's `hhc.exe` writes into `$OBJINST`; it is reproduced for
+interoperability, as the HTML Help viewer's Search tab needs it.

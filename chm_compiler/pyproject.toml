@@ -4,6 +4,8 @@ version = "1.0.0"
 description = "Pure-Python compiler for Microsoft Compiled HTML Help (.chm) files"
 readme = "README.md"
 requires-python = ">=3.8"
+license = {text = "MIT"}
+classifiers = ["License :: OSI Approved :: MIT License"]
 dependencies = []
 
 [project.scripts]
