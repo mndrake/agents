@@ -1,0 +1,17 @@
+[project]
+name = "chmc"
+version = "1.0.0"
+description = "Pure-Python compiler for Microsoft Compiled HTML Help (.chm) files"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+chmc = "chmc.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["chmc"]
