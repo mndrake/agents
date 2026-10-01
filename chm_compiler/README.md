@@ -15,6 +15,24 @@ It includes:
 - a **desktop GUI** (`python -m chmc gui`, uses Tkinter)
 - a **Python API** (`chmc.load_hhp(...)`, `chmc.compile_project(...)`)
 
+## Download
+
+Standalone executables that don't need Python are attached to each
+[GitHub release](../../releases): `chmc-windows-x64.exe`, `chmc-macos-arm64`
+and `chmc-linux-x64`. Use them like the `chmc` command below, for example
+`chmc-windows-x64.exe build my_help\my_help.hhp`. Rename the file to `chmc`
+(`chmc.exe`) if you like.
+
+They are built by `.github/workflows/chmc-release.yml`: pushing a tag such as
+`v1.0.0` runs the tests on Windows, macOS and Linux, builds each executable
+with PyInstaller, smoke-tests it, and publishes the release. To build one
+yourself, run `pip install pyinstaller` and then `bash packaging/build.sh`
+from `chm_compiler/`; the result is in `dist/`.
+
+The executables aren't code-signed, so Windows SmartScreen and macOS
+Gatekeeper may warn before the first run. On macOS, allow it with
+`xattr -d com.apple.quarantine chmc-macos-arm64`.
+
 ## Quick start
 
 ```bash
