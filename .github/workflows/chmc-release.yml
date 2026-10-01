@@ -34,8 +34,8 @@ jobs:
         shell: bash
         working-directory: chm_compiler
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
       - name: Unit tests
@@ -44,7 +44,7 @@ jobs:
         run: |
           python -m pip install pyinstaller
           bash packaging/build.sh "${{ matrix.name }}"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.name }}
           path: chm_compiler/dist/${{ matrix.name }}*
@@ -57,7 +57,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
